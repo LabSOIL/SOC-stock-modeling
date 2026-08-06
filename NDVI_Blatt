@@ -1,0 +1,120 @@
+// Blatt_NDVI_for_Bence
+// Landon.Halloran@unine.ch 
+// 13.01.2025
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #98ff00 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[8.274841010483263, 46.383059993035985],
+          [8.274841010483263, 46.379388918148315],
+          [8.280226886185167, 46.379388918148315],
+          [8.280226886185167, 46.383059993035985]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// 
+// Here is a script that plots the average Summer NDVI across a 
+// zone of interest (I've defined it just by clicking, but you 
+// can import a shape file). It selects the Jul-Sept. images that have 
+// <20% recorded cloud cover, calculates the aveage NDVI per pixel,
+// and plots it all. Also makes time-series of yearly avg. across
+// domain.
+//   
+// notes...
+// 2022-2024 NDVIs appear lower on average because Sentinel-2 changed the 
+// processing for outputs at end of 2021...
+// https://www.reddit.com/r/remotesensing/comments/18a9871/did_sentinel_2_change_between_2021_and_2022/
+// now using COPERNICUS/S2_SR_HARMONIZED which doesn't have this issue...
+//
+// final version sould also have cloud masking
+
+// draw region of interest to define ardutsan
+var blatt = geometry;
+
+var startYear = 2018;
+var endYear = 2024;
+
+// get low-cloud July/Aug/Sept Sentinel-2 images and calculate NDVI, then return mean
+
+function maskClouds(image) {
+  var qa = image.select('QA60'); // Sentinel-2 cloud mask band
+  var cloudMask = qa.bitwiseAnd(1 << 10).eq(0).and(qa.bitwiseAnd(1 << 11).eq(0)); // No clouds or cirrus
+  return image.updateMask(cloudMask);
+}
+
+function getNDVICollection(year) {
+  var startDate = ee.Date.fromYMD(year, 7, 1);
+  var endDate = ee.Date.fromYMD(year, 9, 30);  
+
+  var collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+    .filterDate(startDate, endDate)
+    .filterBounds(blatt)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskClouds)
+    .map(function(image) {
+      var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+      return ndvi.set('system:time_start', image.get('system:time_start'));
+    });
+  print(year, 'Number of images retained for Summer:', collection.size());
+  return collection.mean().clip(blatt).set('year', year);
+}
+
+Map.centerObject(blatt);
+
+// Generate and plot summer average NDVI for each year
+var ndviLayers = [];
+for (var year = startYear; year <= endYear; year++) {
+  var ndvi = getNDVICollection(year);
+  ndviLayers.push(ndvi);
+  Map.addLayer(ndvi, {min: 0, max: 1, palette: ['white', 'green']}, 'NDVI ' + year);
+}
+
+var viridis = [
+  '#440154', '#482878', '#3E4989', '#31688E', '#26828E',
+  '#1F9D89', '#35B779', '#6CCE59', '#B4DE2C', '#FDE725'
+];
+
+// average summer NDVI for all years
+var allYearsAverageNDVI = ee.ImageCollection(ndviLayers).mean();
+Map.addLayer(allYearsAverageNDVI, {min: 0.3, max: 0.9, palette: viridis}, 'Average Summer NDVI (all selected years)');
+
+// time series of the average NDVI in the AOI
+var ndviTimeSeries = ee.FeatureCollection(ndviLayers.map(function(image) {
+  var meanNDVI = image.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: blatt,
+    scale: 10,
+    maxPixels: 1e13
+  }).get('NDVI');
+
+  meanNDVI = ee.Algorithms.If(meanNDVI, meanNDVI, null);
+
+  return ee.Feature(null, {
+    'year': image.get('year'),
+    'NDVI': meanNDVI
+  });
+}));
+
+// Plot the time series
+var chart = ui.Chart.feature.byFeature(ndviTimeSeries, 'year', 'NDVI')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Average Summer NDVI in Blatt zone',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'NDVI'},
+    lineWidth: 2,
+    pointSize: 5
+  });
+print(chart);
+
+// Export the image, specifying the CRS, transform, and region.
+Export.image.toDrive({
+  image: allYearsAverageNDVI,
+  description: 'BlattNDVI_avg_summer_NDVI_S-2_2018-2024',
+  crs: 'EPSG:2056',
+  region: blatt
+});
